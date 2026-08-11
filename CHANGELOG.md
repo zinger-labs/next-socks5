@@ -7,13 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Changed
+### Added
 
 - `[udp].advertise` and the installer's `--udp-advertise` flag now accept a DNS
   name in addition to IP literals. The name is resolved for each new UDP
   association and the resolved IP is returned in `BND.ADDR`, preserving
   compatibility with clients that only accept IP replies while allowing DDNS
   updates to take effect without restarting the server.
+
+### Changed
+
 - **Breaking Rust API change:** `UdpConfig::advertise` changed from
   `Option<IpAddr>` to `Option<AdvertiseHost>`. Downstream callers that construct
   this config in Rust must wrap literal addresses in `AdvertiseHost::Ip`. This
