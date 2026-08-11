@@ -30,7 +30,7 @@ VERSION="latest"          # release tag (e.g. v0.1.0) or "latest"
 BIN_DIR="/usr/local/bin"  # binary install dir
 DEPLOY_DIR="./next-socks5-deploy"   # docker compose dir
 UDP_PORT_RANGE=""         # e.g. 40000-40100 => [udp].port_range (commented when empty)
-UDP_ADVERTISE=""          # client-reachable BND IP => [udp].advertise (commented when empty)
+UDP_ADVERTISE=""          # client-reachable BND IP/domain => [udp].advertise (commented when empty)
 NO_SERVICE="${NO_SERVICE:-no}"      # skip init service setup (env or --no-service)
 STARTED="no"                        # flipped to "yes" once a service is started
 
@@ -55,8 +55,8 @@ Usage: install.sh [options]
   --udp-port-range <range>  Bind UDP relay sockets inside an inclusive port range
                             (e.g. 40000-40100), so a firewall/NAT only needs that
                             range opened. Omitted => OS-assigned ephemeral port.
-  --udp-advertise <ip>      Advertised BND IP in UDP ASSOCIATE replies. Set to a
-                            client-reachable IP when the server is behind NAT/Docker
+  --udp-advertise <host>    Advertised BND host in UDP ASSOCIATE replies. Set to a
+                            client-reachable IP or DDNS name behind NAT/Docker
                             (omitted => advertise the bound address).
   --version <tag>           Release version, e.g. v0.1.0 (default: latest).
   --bin-dir <dir>           Binary install dir (default /usr/local/bin).
@@ -174,9 +174,9 @@ render_config() {
     echo "# port_range = \"40000-40100\"      # bind UDP relay sockets to this range"
   fi
   if [ -n "$UDP_ADVERTISE" ]; then
-    echo "advertise = \"${UDP_ADVERTISE}\"    # advertised BND IP for clients behind NAT"
+    echo "advertise = \"${UDP_ADVERTISE}\"    # advertised BND IP or DDNS name behind NAT"
   else
-    echo "# advertise = \"YOUR_PUBLIC_IP\"    # advertised BND IP for clients behind NAT"
+    echo "# advertise = \"YOUR_PUBLIC_IP_OR_DOMAIN\"  # advertised BND host behind NAT"
   fi
 }
 
@@ -405,8 +405,8 @@ services:
     # Alternative — bridge networking (e.g. Docker Desktop, where host mode is
     # limited): comment out network_mode above, publish the TCP control port plus
     # the configured UDP range (short syntax; long syntax has no range support),
-    # and set [udp].advertise in config.toml to the host's public IP. Keep the UDP
-    # range identical on both sides (port-preserving).
+    # and set [udp].advertise in config.toml to the host's public IP or DDNS
+    # name. Keep the UDP range identical on both sides (port-preserving).
     #ports:
     #  - "${PORT}:${PORT}/tcp"
     #  - "${udp_range_example}:${udp_range_example}/udp"

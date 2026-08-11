@@ -15,7 +15,7 @@ use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpStream, UdpSocket};
 use tokio::sync::{broadcast, watch};
 
-use crate::config::Config;
+use crate::config::{AdvertiseHost, Config};
 use crate::error::Socks5Error;
 use crate::metrics::{ConnKind, Event, Metrics};
 use crate::protocol::address::Address;
@@ -107,7 +107,10 @@ pub async fn run(
     // 1. Bind a per-association UDP relay socket on the control connection's
     //    local IP — a local interface the TCP handshake already succeeded on.
     let bind_ip = match control.local_addr() {
-        Ok(addr) => addr.ip(),
+        // Dual-stack listeners report IPv4 peers through IPv4-mapped IPv6
+        // addresses. Bind an IPv4 relay for those clients so DNS advertise
+        // selection and the actual UDP socket use the same address family.
+        Ok(addr) => addr.ip().to_canonical(),
         Err(_) => return,
     };
 
@@ -116,7 +119,7 @@ pub async fn run(
         // Range exhausted or a fatal bind error: tell the client instead of
         // dropping the request silently.
         Err(_) => {
-            reply_general_failure(&mut control).await;
+            reply_failure(&mut control, Socks5Error::General).await;
             let _ = events.send(Event::Error {
                 code: Socks5Error::General.reply_code(),
                 msg: "udp relay bind failed (port range exhausted?)".to_string(),
@@ -129,10 +132,22 @@ pub async fn run(
         Err(_) => return,
     };
 
-    // 2. Advertise BND.ADDR/PORT: the configured advertise IP (for NAT/Docker)
-    //    when set, else the bound IP. The advertised PORT is always the real
-    //    bound port — where the client must send its datagrams.
-    let advertise_ip = resolve_advertise_ip(&cfg).unwrap_or_else(|| bnd_local.ip());
+    // 2. Advertise BND.ADDR/PORT: the configured IP or per-association DNS
+    //    result (for NAT/Docker), else the bound IP. The advertised PORT is
+    //    always the real bound port — where the client sends its datagrams.
+    let advertise_ip = match resolve_advertise_ip(&cfg, bnd_local.ip()).await {
+        Ok(Some(ip)) => ip,
+        Ok(None) => bnd_local.ip(),
+        Err(host) => {
+            reply_failure(&mut control, Socks5Error::HostUnreachable).await;
+            metrics.record_error(Socks5Error::HostUnreachable.reply_code());
+            let _ = events.send(Event::Error {
+                code: Socks5Error::HostUnreachable.reply_code(),
+                msg: format!("could not resolve UDP advertise host {host}"),
+            });
+            return;
+        }
+    };
     let bnd_address = addr_from_socket(SocketAddr::new(advertise_ip, bnd_local.port()));
     let mut out = Vec::with_capacity(22);
     encode_reply(REP_SUCCEEDED, &bnd_address, &mut out);
@@ -150,7 +165,7 @@ pub async fn run(
     });
 
     // 3. Relay state.
-    let client_ip = client_peer.ip();
+    let client_ip = client_peer.ip().to_canonical();
     // The client's actual UDP source, learned from its first datagram.
     let mut client_udp_addr: Option<SocketAddr> = None;
     // Targets we have forwarded to. Used to disambiguate inbound datagrams from
@@ -378,25 +393,36 @@ async fn bind_with_retry(
     ))
 }
 
-/// Send a best-effort SOCKS5 general-failure reply (REP=0x01) with a zeroed IPv4
-/// BND, used when the relay socket cannot be bound.
-async fn reply_general_failure(control: &mut TcpStream) {
+/// Send a best-effort SOCKS5 failure reply with a zeroed IPv4 BND.
+async fn reply_failure(control: &mut TcpStream, error: Socks5Error) {
     let bnd = Address::V4(Ipv4Addr::UNSPECIFIED, 0);
     let mut out = Vec::with_capacity(10);
-    encode_reply(Socks5Error::General.reply_code(), &bnd, &mut out);
+    encode_reply(error.reply_code(), &bnd, &mut out);
     let _ = control.write_all(&out).await;
 }
 
-/// Advertised BND IP for UDP ASSOCIATE replies: the configured `[udp].advertise`
-/// IP when set and usable, else `None` (the caller falls back to the bound IP).
-/// The value is validated to a real IP at config load; an unspecified address
-/// (`0.0.0.0` / `::`) is rejected here — never advertised.
-fn resolve_advertise_ip(cfg: &Config) -> Option<IpAddr> {
-    let ip = cfg.udp.advertise?;
-    if ip.is_unspecified() {
-        None
-    } else {
-        Some(ip)
+/// Resolve the configured UDP advertise host for a new association. Domain
+/// names are resolved here, rather than at startup, so DDNS changes take effect
+/// without restarting the server. The result must match the relay socket's
+/// address family; advertising an address in another family would be unusable.
+async fn resolve_advertise_ip(cfg: &Config, bind_ip: IpAddr) -> Result<Option<IpAddr>, String> {
+    match cfg.udp.advertise.as_ref() {
+        None => Ok(None),
+        Some(AdvertiseHost::Ip(ip)) if ip.is_unspecified() => Ok(None),
+        Some(AdvertiseHost::Ip(ip)) => Ok(Some(*ip)),
+        Some(AdvertiseHost::Domain(host)) => {
+            let timeout = Duration::from_millis(cfg.timeouts.connect_ms);
+            let resolved =
+                tokio::time::timeout(timeout, tokio::net::lookup_host((host.as_str(), 0)))
+                    .await
+                    .map_err(|_| host.clone())?
+                    .map_err(|_| host.clone())?;
+            let ip = resolved
+                .map(|addr| addr.ip().to_canonical())
+                .find(|ip| !ip.is_unspecified() && ip.is_ipv4() == bind_ip.is_ipv4())
+                .ok_or_else(|| host.clone())?;
+            Ok(Some(ip))
+        }
     }
 }
 
