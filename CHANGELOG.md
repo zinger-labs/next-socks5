@@ -19,6 +19,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   this config in Rust must wrap literal addresses in `AdvertiseHost::Ip`. This
   requires the next release to be `0.6.0`, rather than a `0.5.x` patch release.
 
+### Fixed
+
+- UDP ASSOCIATE now canonicalizes IPv4-mapped IPv6 addresses from dual-stack
+  TCP listeners before binding the relay, selecting a DNS result, and filtering
+  the client's UDP source. IPv4 clients now receive a reachable IPv4
+  `BND.ADDR` and can relay datagrams through an IPv6 wildcard listener.
+- `[udp].advertise` rejects invalid IP-like values such as `203.0.113.442` at
+  config load instead of treating them as DNS names that fail at association
+  time.
+
 ## [0.5.0] - 2026-07-07
 
 Performance release, driven by the project's first systematic benchmark pass
