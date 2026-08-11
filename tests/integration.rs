@@ -11,7 +11,7 @@ use next_socks5::protocol::address::Address;
 use next_socks5::protocol::udp;
 use next_socks5::server;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream, UdpSocket};
+use tokio::net::{TcpListener, TcpSocket, TcpStream, UdpSocket};
 use tokio::sync::{broadcast, watch};
 
 /// Spawn a one-shot TCP echo server. Returns its bound address.
@@ -296,6 +296,71 @@ async fn udp_advertise_domain_resolves_for_each_association() {
     tokio::time::timeout(Duration::from_secs(5), scenario)
         .await
         .expect("domain advertise scenario timed out");
+}
+
+#[tokio::test]
+async fn udp_advertise_domain_uses_ipv4_for_ipv4_client_on_dual_stack_listener() {
+    let scenario = async {
+        let echo_addr = spawn_udp_echo_server().await;
+        let echo_v4 = match echo_addr.ip() {
+            std::net::IpAddr::V4(ip) => ip,
+            std::net::IpAddr::V6(_) => panic!("expected v4 echo addr"),
+        };
+
+        let socket = TcpSocket::new_v6().unwrap();
+        socket.bind("[::]:0".parse().unwrap()).unwrap();
+        let listener = socket.listen(1024).unwrap();
+        let proxy_port = listener.local_addr().unwrap().port();
+
+        let mut cfg = no_auth_config();
+        cfg.listen = "[::]:0".to_string();
+        cfg.udp.advertise = Some(AdvertiseHost::Domain("localhost".to_string()));
+        let cfg = Arc::new(cfg);
+        let metrics = Metrics::new();
+        let (events, _events_rx) = broadcast::channel(64);
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        std::mem::forget(shutdown_tx);
+        std::mem::forget(_events_rx);
+        tokio::spawn(server::run(listener, cfg, metrics, events, shutdown_rx));
+
+        let proxy_addr = std::net::SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, proxy_port));
+        let mut control = TcpStream::connect(proxy_addr).await.unwrap();
+        control.write_all(&[0x05, 0x01, 0x00]).await.unwrap();
+        let mut method_reply = [0u8; 2];
+        control.read_exact(&mut method_reply).await.unwrap();
+        assert_eq!(method_reply, [0x05, 0x00]);
+
+        control
+            .write_all(&[0x05, 0x03, 0x00, 0x01, 0, 0, 0, 0, 0, 0])
+            .await
+            .unwrap();
+        let mut reply_header = [0u8; 4];
+        control.read_exact(&mut reply_header).await.unwrap();
+        assert_eq!(reply_header, [0x05, 0x00, 0x00, 0x01]);
+
+        let mut reply_addr = [0u8; 6];
+        control.read_exact(&mut reply_addr).await.unwrap();
+        assert_eq!(&reply_addr[..4], &std::net::Ipv4Addr::LOCALHOST.octets());
+
+        let relay_port = u16::from_be_bytes([reply_addr[4], reply_addr[5]]);
+        let relay_addr = std::net::SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, relay_port));
+        let client_udp = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let mut out = Vec::new();
+        udp::encap(
+            &Address::V4(echo_v4, echo_addr.port()),
+            b"dual-stack",
+            &mut out,
+        );
+        client_udp.send_to(&out, relay_addr).await.unwrap();
+
+        let mut buf = [0u8; 65536];
+        let (n, _) = client_udp.recv_from(&mut buf).await.unwrap();
+        let datagram = udp::decap(&buf[..n]).expect("valid SOCKS5 UDP datagram");
+        assert_eq!(datagram.data, b"dual-stack");
+    };
+    tokio::time::timeout(Duration::from_secs(5), scenario)
+        .await
+        .expect("dual-stack UDP advertise scenario timed out");
 }
 
 #[tokio::test]

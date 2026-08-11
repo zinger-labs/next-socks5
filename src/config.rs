@@ -223,6 +223,10 @@ fn is_valid_dns_name(s: &str) -> bool {
     let name = s.strip_suffix('.').unwrap_or(s);
     !name.is_empty()
         && name.len() <= 253
+        && name
+            .rsplit('.')
+            .next()
+            .is_some_and(|label| label.bytes().any(|byte| byte.is_ascii_alphabetic()))
         && name.split('.').all(|label| {
             !label.is_empty()
                 && label.len() <= 63
@@ -690,6 +694,15 @@ max_connections = 1024
         // ignored at runtime.
         let res = Config::from_toml_str("listen = \"x\"\n[udp]\nadvertise = \"bad host!\"");
         assert!(res.is_err(), "malformed advertise must be rejected at load");
+    }
+
+    #[test]
+    fn advertise_rejects_invalid_ip_like_domain() {
+        let res = Config::from_toml_str("listen = \"x\"\n[udp]\nadvertise = \"203.0.113.442\"");
+        assert!(
+            res.is_err(),
+            "an invalid IP literal must not be accepted as a DNS name"
+        );
     }
 
     #[test]

@@ -14,6 +14,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   association and the resolved IP is returned in `BND.ADDR`, preserving
   compatibility with clients that only accept IP replies while allowing DDNS
   updates to take effect without restarting the server.
+- **Breaking Rust API change:** `UdpConfig::advertise` changed from
+  `Option<IpAddr>` to `Option<AdvertiseHost>`. Downstream callers that construct
+  this config in Rust must wrap literal addresses in `AdvertiseHost::Ip`. This
+  requires the next release to be `0.6.0`, rather than a `0.5.x` patch release.
 
 ## [0.5.0] - 2026-07-07
 

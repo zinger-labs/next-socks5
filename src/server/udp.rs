@@ -107,7 +107,10 @@ pub async fn run(
     // 1. Bind a per-association UDP relay socket on the control connection's
     //    local IP — a local interface the TCP handshake already succeeded on.
     let bind_ip = match control.local_addr() {
-        Ok(addr) => addr.ip(),
+        // Dual-stack listeners report IPv4 peers through IPv4-mapped IPv6
+        // addresses. Bind an IPv4 relay for those clients so DNS advertise
+        // selection and the actual UDP socket use the same address family.
+        Ok(addr) => addr.ip().to_canonical(),
         Err(_) => return,
     };
 
@@ -162,7 +165,7 @@ pub async fn run(
     });
 
     // 3. Relay state.
-    let client_ip = client_peer.ip();
+    let client_ip = client_peer.ip().to_canonical();
     // The client's actual UDP source, learned from its first datagram.
     let mut client_udp_addr: Option<SocketAddr> = None;
     // Targets we have forwarded to. Used to disambiguate inbound datagrams from
@@ -415,7 +418,7 @@ async fn resolve_advertise_ip(cfg: &Config, bind_ip: IpAddr) -> Result<Option<Ip
                     .map_err(|_| host.clone())?
                     .map_err(|_| host.clone())?;
             let ip = resolved
-                .map(|addr| addr.ip())
+                .map(|addr| addr.ip().to_canonical())
                 .find(|ip| !ip.is_unspecified() && ip.is_ipv4() == bind_ip.is_ipv4())
                 .ok_or_else(|| host.clone())?;
             Ok(Some(ip))
