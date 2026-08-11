@@ -173,39 +173,71 @@ pub struct UdpConfig {
     /// `None` => OS-assigned ephemeral port.
     #[serde(default)]
     pub port_range: Option<PortRange>,
-    /// Advertised BND.ADDR IP for UDP ASSOCIATE replies (advertise-only; the
-    /// advertised port is always the real bound port). `None` => advertise the
-    /// bound address. Needed behind NAT/Docker. Accepts a bare IP or an
-    /// `ip:port` (the port is ignored); a malformed value is rejected at config
-    /// load so a typo fails fast instead of being silently ignored at runtime.
-    #[serde(default, deserialize_with = "de_advertise_ip")]
-    pub advertise: Option<std::net::IpAddr>,
+    /// Host advertised as BND.ADDR in UDP ASSOCIATE replies. Domain names are
+    /// resolved for each new association so DDNS changes do not require a
+    /// server restart. The advertised port is always the real bound port.
+    #[serde(default, deserialize_with = "de_advertise_host")]
+    pub advertise: Option<AdvertiseHost>,
 }
 
-/// Deserialize `[udp].advertise`: accept a bare IP or an `ip:port` (the port is
-/// ignored — only the IP is advertised), rejecting anything else at config load.
-fn de_advertise_ip<'de, D>(deserializer: D) -> Result<Option<std::net::IpAddr>, D::Error>
+/// A client-reachable IP address or DNS name configured for UDP ASSOCIATE.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AdvertiseHost {
+    /// A literal IPv4 or IPv6 address.
+    Ip(std::net::IpAddr),
+    /// An ASCII DNS hostname resolved when an association is created.
+    Domain(String),
+}
+
+/// Deserialize `[udp].advertise`, rejecting malformed hostnames at config load.
+fn de_advertise_host<'de, D>(deserializer: D) -> Result<Option<AdvertiseHost>, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
     let s = <String as serde::Deserialize>::deserialize(deserializer)?;
-    parse_advertise_ip(&s)
+    parse_advertise_host(&s)
         .map(Some)
         .map_err(serde::de::Error::custom)
 }
 
-/// Parse a `[udp].advertise` value into an IP. Accepts a bare IP, or an
-/// `ip:port` whose port is discarded; returns an error message otherwise.
-fn parse_advertise_ip(s: &str) -> Result<std::net::IpAddr, String> {
+/// Parse a `[udp].advertise` value. A port on an IP literal is accepted for
+/// backward compatibility and discarded because the relay advertises its real
+/// bound port.
+fn parse_advertise_host(s: &str) -> Result<AdvertiseHost, String> {
     if let Ok(ip) = s.parse::<std::net::IpAddr>() {
-        return Ok(ip);
+        return Ok(AdvertiseHost::Ip(ip));
     }
     if let Ok(sa) = s.parse::<std::net::SocketAddr>() {
-        return Ok(sa.ip());
+        return Ok(AdvertiseHost::Ip(sa.ip()));
+    }
+    if is_valid_dns_name(s) {
+        return Ok(AdvertiseHost::Domain(s.to_string()));
     }
     Err(format!(
-        "invalid advertise address {s:?}: expected an IP (e.g. \"203.0.113.42\") or \"ip:port\""
+        "invalid advertise address {s:?}: expected an IP, ip:port, or DNS name"
     ))
+}
+
+/// Validate the ASCII hostname form accepted by the platform resolver.
+fn is_valid_dns_name(s: &str) -> bool {
+    let name = s.strip_suffix('.').unwrap_or(s);
+    !name.is_empty()
+        && name.len() <= 253
+        && name.split('.').all(|label| {
+            !label.is_empty()
+                && label.len() <= 63
+                && label
+                    .as_bytes()
+                    .first()
+                    .is_some_and(u8::is_ascii_alphanumeric)
+                && label
+                    .as_bytes()
+                    .last()
+                    .is_some_and(u8::is_ascii_alphanumeric)
+                && label
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+        })
 }
 
 /// Resource limits.
@@ -640,7 +672,10 @@ max_connections = 1024
             cfg.udp.port_range,
             Some(PortRange { start: 40000, end: 40100 })
         );
-        assert_eq!(cfg.udp.advertise, Some("203.0.113.42".parse().unwrap()));
+        assert_eq!(
+            cfg.udp.advertise,
+            Some(AdvertiseHost::Ip("203.0.113.42".parse().unwrap()))
+        );
     }
 
     #[test]
@@ -653,7 +688,7 @@ max_connections = 1024
     fn advertise_rejects_malformed() {
         // A typo'd advertise address must fail at config load, not be silently
         // ignored at runtime.
-        let res = Config::from_toml_str("listen = \"x\"\n[udp]\nadvertise = \"not-an-ip\"");
+        let res = Config::from_toml_str("listen = \"x\"\n[udp]\nadvertise = \"bad host!\"");
         assert!(res.is_err(), "malformed advertise must be rejected at load");
     }
 
@@ -662,6 +697,19 @@ max_connections = 1024
         // An `ip:port` form is accepted; only the IP is kept (port ignored).
         let cfg = Config::from_toml_str("listen = \"x\"\n[udp]\nadvertise = \"203.0.113.42:1080\"")
             .expect("ip:port advertise should parse");
-        assert_eq!(cfg.udp.advertise, Some("203.0.113.42".parse().unwrap()));
+        assert_eq!(
+            cfg.udp.advertise,
+            Some(AdvertiseHost::Ip("203.0.113.42".parse().unwrap()))
+        );
+    }
+
+    #[test]
+    fn advertise_accepts_domain() {
+        let cfg = Config::from_toml_str("listen = \"x\"\n[udp]\nadvertise = \"t.900040.xyz\"")
+            .expect("domain advertise should parse");
+        assert_eq!(
+            cfg.udp.advertise,
+            Some(AdvertiseHost::Domain("t.900040.xyz".to_string()))
+        );
     }
 }

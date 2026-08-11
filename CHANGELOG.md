@@ -5,6 +5,16 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- `[udp].advertise` and the installer's `--udp-advertise` flag now accept a DNS
+  name in addition to IP literals. The name is resolved for each new UDP
+  association and the resolved IP is returned in `BND.ADDR`, preserving
+  compatibility with clients that only accept IP replies while allowing DDNS
+  updates to take effect without restarting the server.
+
 ## [0.5.0] - 2026-07-07
 
 Performance release, driven by the project's first systematic benchmark pass

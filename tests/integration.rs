@@ -3,7 +3,9 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use next_socks5::config::{AuthConfig, AuthMethod, Config, Egress, Limits, Timeouts};
+use next_socks5::config::{
+    AdvertiseHost, AuthConfig, AuthMethod, Config, Egress, Limits, Timeouts,
+};
 use next_socks5::metrics::Metrics;
 use next_socks5::protocol::address::Address;
 use next_socks5::protocol::udp;
@@ -142,6 +144,18 @@ async fn spawn_udp_echo_server() -> std::net::SocketAddr {
     addr
 }
 
+/// Return the IPv4 address selected by the local route table without sending
+/// any packets. This gives the domain-advertise test a bind address distinct
+/// from `localhost` without relying on a hard-coded interface address.
+fn routed_local_ipv4() -> std::net::Ipv4Addr {
+    let probe = std::net::UdpSocket::bind("0.0.0.0:0").unwrap();
+    probe.connect("192.0.2.1:9").unwrap();
+    match probe.local_addr().unwrap().ip() {
+        std::net::IpAddr::V4(ip) if !ip.is_loopback() && !ip.is_unspecified() => ip,
+        ip => panic!("expected a routed non-loopback IPv4 address, got {ip}"),
+    }
+}
+
 #[tokio::test]
 async fn udp_associate_echo() {
     let scenario = async {
@@ -218,7 +232,7 @@ async fn udp_advertised_addr_uses_udp_advertise() {
         // control connection's local IP), and the reply must carry the
         // advertised IP — proving advertise is decoupled from bind.
         let mut cfg = no_auth_config();
-        cfg.udp.advertise = Some("203.0.113.9".parse().unwrap());
+        cfg.udp.advertise = Some(AdvertiseHost::Ip("203.0.113.9".parse().unwrap()));
         let proxy_addr = start_server_with_config(cfg).await;
 
         let mut control = TcpStream::connect(proxy_addr).await.unwrap();
@@ -248,6 +262,40 @@ async fn udp_advertised_addr_uses_udp_advertise() {
     tokio::time::timeout(Duration::from_secs(5), scenario)
         .await
         .expect("udp advertise scenario timed out");
+}
+
+#[tokio::test]
+async fn udp_advertise_domain_resolves_for_each_association() {
+    let scenario = async {
+        let mut cfg = no_auth_config();
+        cfg.listen = format!("{}:0", routed_local_ipv4());
+        cfg.udp.advertise = Some(AdvertiseHost::Domain("localhost".to_string()));
+        let proxy_addr = start_server_with_config(cfg).await;
+
+        let mut control = TcpStream::connect(proxy_addr).await.unwrap();
+        control.write_all(&[0x05, 0x01, 0x00]).await.unwrap();
+        let mut method_reply = [0u8; 2];
+        control.read_exact(&mut method_reply).await.unwrap();
+        assert_eq!(method_reply, [0x05, 0x00]);
+
+        control
+            .write_all(&[0x05, 0x03, 0x00, 0x01, 0, 0, 0, 0, 0, 0])
+            .await
+            .unwrap();
+        let mut reply = [0u8; 10];
+        control.read_exact(&mut reply).await.unwrap();
+        assert_eq!(reply[1], 0x00, "expected success reply code");
+        assert_eq!(reply[3], 0x01, "resolved BND.ADDR must be IPv4");
+        let bnd_ip = std::net::Ipv4Addr::new(reply[4], reply[5], reply[6], reply[7]);
+        assert_eq!(
+            bnd_ip,
+            std::net::Ipv4Addr::LOCALHOST,
+            "domain advertise must resolve instead of falling back to the bound IP"
+        );
+    };
+    tokio::time::timeout(Duration::from_secs(5), scenario)
+        .await
+        .expect("domain advertise scenario timed out");
 }
 
 #[tokio::test]

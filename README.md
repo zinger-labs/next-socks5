@@ -84,8 +84,8 @@ URL and a `curl` test command.
 # Bind to a single interface instead of 0.0.0.0 (here: localhost only)
 ./install.sh --no-auth --listen 127.0.0.1 --port 1080
 
-# UDP relay behind NAT/Docker: pin the relay port range and advertise a public IP
-./install.sh --port 1080 --udp-port-range 40000-40100 --udp-advertise 203.0.113.42
+# UDP relay behind NAT/Docker: pin the relay port range and advertise a DDNS name
+./install.sh --port 1080 --udp-port-range 40000-40100 --udp-advertise socks.example.com
 
 # Pin a specific release instead of `latest`
 ./install.sh --version v0.2.0 --port 1080
@@ -106,7 +106,7 @@ URL and a `curl` test command.
 | `--port <port>` | Listen port (random free port if omitted) | random |
 | `--listen <addr>` | Bind address | `0.0.0.0` |
 | `--udp-port-range <range>` | Bind UDP relay sockets inside an inclusive range (e.g. `40000-40100`) | OS ephemeral |
-| `--udp-advertise <ip>` | Advertised BND IP for UDP behind NAT/Docker (a client-reachable address) | bound IP |
+| `--udp-advertise <host>` | Advertised BND IP or DDNS name for UDP behind NAT/Docker | bound IP |
 | `--version <tag>` | Release version, e.g. `v0.1.0` | `latest` |
 | `--bin-dir <dir>` | Binary install directory (binary method) | `/usr/local/bin` |
 | `--dir <dir>` | Docker deploy directory (docker method) | `./next-socks5-deploy` |
@@ -283,10 +283,10 @@ through firewalls and NAT:
 ```toml
 [udp]
 port_range = "40000-40100"   # bind UDP relay sockets to this inclusive range
-advertise  = "203.0.113.42"  # advertised BND IP (a client-reachable address)
+advertise  = "socks.example.com"  # client-reachable public IP or DDNS name
 ```
 
-> `install.sh --udp-port-range 40000-40100 --udp-advertise 203.0.113.42` writes
+> `install.sh --udp-port-range 40000-40100 --udp-advertise socks.example.com` writes
 > exactly this `[udp]` block for you.
 
 - **`port_range`** — bind each association's UDP socket inside a known range
@@ -295,19 +295,26 @@ advertise  = "203.0.113.42"  # advertised BND IP (a client-reachable address)
   expected concurrent UDP clients**; `"40000-40000"` is a single port and
   serializes UDP. When the range is exhausted, UDP ASSOCIATE returns a general
   failure.
-- **`advertise`** — the IP put in the UDP ASSOCIATE reply. By default the server
+- **`advertise`** — the client-reachable IP or DNS name used for the UDP
+  ASSOCIATE reply. By default the server
   advertises the server-side IP the client's TCP connection arrived on (the
   control socket's local address); override it when that
   IP is not client-reachable (behind NAT, or Docker bridge networking). The
   advertised **port is always the real bound port**, so any NAT/forward must be
   **port-preserving (1:1)**. An unreachable advertised address is the #1 cause of
-  "TCP works but UDP doesn't". Accepts a bare IP or `ip:port` (port ignored); a
-  malformed value is rejected at startup rather than silently ignored.
+  "TCP works but UDP doesn't". A DNS name is resolved for each new association,
+  and the resulting IP is returned to the client, so DDNS changes apply without
+  restarting the server. Existing associations keep their original address.
+  If resolution fails or yields no address matching the relay socket's address
+  family, the association fails with `host unreachable` instead of advertising
+  an unreachable private/bound address.
+  Accepts a bare IP, `ip:port` (port ignored), or an ASCII DNS name; malformed
+  values are rejected at startup.
 
 **Docker.** The provided compose uses `network_mode: host` (Linux), which needs no
 port mapping. For bridge networking, publish the TCP control port and the UDP
 range with **short syntax** (Compose long syntax has no range support) and set
-`advertise` to the host's public IP:
+`advertise` to the host's public IP or DDNS name:
 
 ```yaml
 ports:
